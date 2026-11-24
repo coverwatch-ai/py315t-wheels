@@ -1,0 +1,173 @@
+name: Build temporalio wheels
+
+# Builds unmodified upstream temporalio/sdk-python wheels (cp311-abi3 + cp315t)
+# and publishes a flat package index (index.html) + SHA256SUMS to GitHub Releases.
+#
+# Trigger by pushing a tag `temporalio-vX.Y.Z` (publishes a release) or via
+# workflow_dispatch (builds and tests wheels; optionally publishes when publish=true).
+on:
+  push:
+    tags: ["temporalio-v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Upstream temporalio/sdk-python version without leading v (e.g. 1.36.1)"
+        required: true
+        default: "1.36.1"
+      publish:
+        description: "Publish GitHub Release temporalio-v<version>"
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: temporalio-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      tag: ${{ steps.ver.outputs.tag }}
+      should_publish: ${{ steps.ver.outputs.should_publish }}
+    steps:
+      - id: ver
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_PUBLISH: ${{ inputs.publish }}
+        run: |
+          if [ "$REF_TYPE" = "tag" ]; then
+            version="${REF_NAME#temporalio-v}"
+            tag="$REF_NAME"
+            should_publish="true"
+          else
+            version="$INPUT_VERSION"
+            tag="temporalio-v${version}"
+            should_publish="${INPUT_PUBLISH:-false}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "should_publish=$should_publish" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build temporalio (${{ matrix.name }})
+    needs: resolve
+    timeout-minutes: 45
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            cibw_build: "cp311-manylinux_x86_64 cp315t-manylinux_x86_64"
+          - name: linux-aarch64
+            os: ubuntu-24.04-arm
+            cibw_build: "cp311-manylinux_aarch64 cp315t-manylinux_aarch64"
+          - name: macos-arm64
+            os: macos-15
+            cibw_build: "cp311-macosx_arm64 cp315t-macosx_arm64"
+    steps:
+      - name: Checkout upstream temporalio/sdk-python v${{ needs.resolve.outputs.version }}
+        uses: actions/checkout@v4
+        with:
+          repository: temporalio/sdk-python
+          ref: v${{ needs.resolve.outputs.version }}
+          submodules: recursive
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install Rust (macOS)
+        if: runner.os == 'macOS'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install protoc (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+
+      - name: Build wheels with cibuildwheel
+        env:
+          CIBW_ENABLE: cpython-freethreading
+          CIBW_BUILD: ${{ matrix.cibw_build }}
+          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
+          CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_28
+          CIBW_TEST_SKIP: "*"
+        run: |
+          uvx --from "cibuildwheel>=3.0" cibuildwheel --output-dir dist
+          ls -la dist
+
+      - name: Verify both abi3 and cp315t wheels were produced
+        shell: bash
+        run: |
+          ls dist/*-abi3-*.whl
+          ls dist/*-cp315t-*.whl
+
+      - name: Smoke-test wheels on Python 3.15 (GIL) and 3.15t (free-threaded)
+        shell: bash
+        run: |
+          for py in 3.15 3.15t; do
+            echo "=== Testing $py ==="
+            uv venv --python "$py" ".test-$py"
+            uv pip install --python ".test-$py" --find-links dist --no-build-package temporalio "temporalio==${{ needs.resolve.outputs.version }}"
+            if [ "$py" = "3.15t" ]; then
+              PYTHON_GIL=0 ".test-$py/bin/python" -c "import sys, temporalio, temporalio.client; from temporalio.bridge import temporal_sdk_bridge; assert not sys._is_gil_enabled(); print('3.15t OK:', temporalio.__version__, 'GIL:', sys._is_gil_enabled())"
+            else
+              ".test-$py/bin/python" -c "import sys, temporalio, temporalio.client; from temporalio.bridge import temporal_sdk_bridge; print('3.15 GIL OK:', temporalio.__version__, 'GIL:', sys._is_gil_enabled())"
+            fi
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.name }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  publish:
+    if: needs.resolve.outputs.should_publish == 'true'
+    needs: [resolve, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+
+      - name: Publish GitHub Release with flat index
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          (cd dist && sha256sum -- *.whl > SHA256SUMS)
+          {
+            printf '<!doctype html><html><body>\n'
+            while read -r checksum filename; do
+              printf '<a href="https://github.com/%s/releases/download/%s/%s#sha256=%s">%s</a><br>\n' \
+                "$GITHUB_REPOSITORY" "$TAG" "$filename" "$checksum" "$filename"
+            done < dist/SHA256SUMS
+            printf '</body></html>\n'
+          } > dist/index.html
+
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release $TAG already exists" >&2
+            exit 1
+          fi
+
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --title "temporalio ${VERSION} (abi3 + cp315t)" \
+            --notes "Unmodified upstream temporalio/sdk-python v${VERSION} wheels built for CPython 3.11+ abi3 and free-threaded CPython 3.15t." \
+            --draft
+          gh release upload "$TAG" dist/* --repo "$GITHUB_REPOSITORY"
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
