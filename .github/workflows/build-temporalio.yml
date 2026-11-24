@@ -73,6 +73,9 @@ jobs:
           - name: macos-arm64
             os: macos-15
             cibw_build: "cp311-macosx_arm64 cp315t-macosx_arm64"
+          - name: macos-x86_64
+            os: macos-15-intel
+            cibw_build: "cp311-macosx_x86_64 cp315t-macosx_x86_64"
     steps:
       - name: Checkout upstream temporalio/sdk-python ${{ needs.resolve.outputs.version }}
         uses: actions/checkout@v6
@@ -112,14 +115,18 @@ jobs:
       - name: Smoke-test wheels on Python 3.15 (GIL) and 3.15t (free-threaded)
         shell: bash
         run: |
+          set -euo pipefail
+          DIST_DIR="$(pwd)/dist"
           for py in 3.15 3.15t; do
             echo "=== Testing $py ==="
-            uv venv --python "$py" ".test-$py"
-            uv pip install --python ".test-$py" --find-links dist --no-build-package temporalio "temporalio==${{ needs.resolve.outputs.version }}"
+            VENV_DIR="/tmp/test-temporalio-$py"
+            rm -rf "$VENV_DIR"
+            uv venv --python "$py" "$VENV_DIR"
+            uv pip install --python "$VENV_DIR" --find-links "$DIST_DIR" --only-binary temporalio "temporalio==${{ needs.resolve.outputs.version }}"
             if [ "$py" = "3.15t" ]; then
-              PYTHON_GIL=0 ".test-$py/bin/python" -c "import sys, temporalio, temporalio.client; from temporalio.bridge import temporal_sdk_bridge; assert not sys._is_gil_enabled(); print('3.15t OK:', temporalio.__version__, 'GIL:', sys._is_gil_enabled())"
+              (cd /tmp && PYTHON_GIL=0 "$VENV_DIR/bin/python" -c "import sys, temporalio, temporalio.client; from temporalio.bridge import temporal_sdk_bridge; assert not sys._is_gil_enabled(); print('3.15t OK:', temporalio.__version__, temporalio.__file__, 'GIL:', sys._is_gil_enabled())")
             else
-              ".test-$py/bin/python" -c "import sys, temporalio, temporalio.client; from temporalio.bridge import temporal_sdk_bridge; print('3.15 GIL OK:', temporalio.__version__, 'GIL:', sys._is_gil_enabled())"
+              (cd /tmp && "$VENV_DIR/bin/python" -c "import sys, temporalio, temporalio.client; from temporalio.bridge import temporal_sdk_bridge; print('3.15 GIL OK:', temporalio.__version__, temporalio.__file__, 'GIL:', sys._is_gil_enabled())")
             fi
           done
 
