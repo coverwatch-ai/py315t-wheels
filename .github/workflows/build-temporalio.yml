@@ -81,7 +81,7 @@ jobs:
           ref: ${{ needs.resolve.outputs.version }}
           submodules: recursive
 
-      - uses: astral-sh/setup-uv@v8
+      - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.14"
 
