@@ -74,14 +74,14 @@ jobs:
             os: macos-15
             cibw_build: "cp311-macosx_arm64 cp315t-macosx_arm64"
     steps:
-      - name: Checkout upstream temporalio/sdk-python v${{ needs.resolve.outputs.version }}
-        uses: actions/checkout@v4
+      - name: Checkout upstream temporalio/sdk-python ${{ needs.resolve.outputs.version }}
+        uses: actions/checkout@v6
         with:
           repository: temporalio/sdk-python
-          ref: v${{ needs.resolve.outputs.version }}
+          ref: ${{ needs.resolve.outputs.version }}
           submodules: recursive
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.14"
 
@@ -124,7 +124,7 @@ jobs:
             fi
           done
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: wheels-${{ matrix.name }}
           path: dist/*.whl
@@ -137,7 +137,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v6
         with:
           pattern: wheels-*
           path: dist
